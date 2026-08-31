@@ -4,6 +4,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
 import me.rerere.workspace.RootfsInstallProgress
+import me.rerere.workspace.WorkspaceManager
 import workspacemcp.app.AppRuntime
 import workspacemcp.app.data.WorkspaceRecord
 import java.util.UUID

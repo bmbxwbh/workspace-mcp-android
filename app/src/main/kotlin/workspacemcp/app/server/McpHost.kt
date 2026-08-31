@@ -3,15 +3,17 @@ package workspacemcp.app.server
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
-import io.ktor.http.StatusCode
+import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.Application
 import io.ktor.server.application.ApplicationCallPipeline
 import io.ktor.server.application.call
+import io.ktor.server.application.install
 import io.ktor.server.cio.CIO
 import io.ktor.server.cio.CIOApplicationEngine
 import io.ktor.server.engine.EmbeddedServer
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.plugins.cors.routing.CORS
+import io.ktor.server.request.path
 import io.ktor.server.response.respondText
 import io.ktor.server.routing.get
 import io.ktor.server.routing.routing
@@ -23,7 +25,7 @@ import workspacemcp.app.mcp.createWorkspaceMcpServer
 
 class McpServerHandle(
     val port: Int,
-    private val server: EmbeddedServer<CIOApplicationEngine, Application>,
+    private val server: EmbeddedServer<CIOApplicationEngine, CIOApplicationEngine.Configuration>,
 ) {
     fun stop() {
         server.stop(gracePeriodMillis = 500, timeoutMillis = 2000)
@@ -39,7 +41,7 @@ class McpServerHandle(
 fun startMcpServer(runtime: AppRuntime): McpServerHandle {
     val controller = WorkspaceController(runtime)
     val port = runtime.settings.port()
-    val token = runtime.settings.token().takeIf { it.isNotBlank() }
+    val token = runtime.settings.token()
 
     val server = embeddedServer(CIO, host = "0.0.0.0", port = port) {
         installCors()
@@ -47,17 +49,17 @@ fun startMcpServer(runtime: AppRuntime): McpServerHandle {
             installBearerAuth(token)
         }
 
-        // Streamable HTTP 传输
+        // Streamable HTTP 传输 (同时安装 SSE/ContentNegotiation 插件, 供下方 SSE 路由复用)
         mcpStreamableHttp(path = "/mcp", enableDnsRebindingProtection = false) {
             createWorkspaceMcpServer(controller)
         }
 
-        // SSE 传输 (旧协议)
-        mcp(path = "/sse", enableDnsRebindingProtection = false) {
-            createWorkspaceMcpServer(controller)
-        }
-
         routing {
+            // SSE 传输 (旧协议)
+            mcp(path = "/sse", enableDnsRebindingProtection = false) {
+                createWorkspaceMcpServer(controller)
+            }
+
             // 健康检查 / 首页
             get("/") {
                 call.respondText(
@@ -93,7 +95,7 @@ private fun Application.installBearerAuth(token: String) {
         if (call.request.path() == "/") return@intercept
         val provided = call.request.headers[HttpHeaders.Authorization]
         if (provided != "Bearer $token") {
-            call.respondText("Unauthorized", ContentType.TextPlain, StatusCode.Unauthorized)
+            call.respondText("Unauthorized", ContentType.TextPlain, HttpStatusCode.Unauthorized)
             finish()
         }
     }

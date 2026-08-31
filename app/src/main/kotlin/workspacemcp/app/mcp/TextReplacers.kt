@@ -142,7 +142,7 @@ object LineTrimmedReplacer : LineWindowReplacer() {
 object BlockAnchorReplacer : LineWindowReplacer() {
     override val name: String = "block_anchor"
 
-    override val isApplicable(oldTrimmed: List<String>): Boolean =
+    override fun isApplicable(oldTrimmed: List<String>): Boolean =
         oldTrimmed.size >= 3 && oldTrimmed.first().isNotEmpty() && oldTrimmed.last().isNotEmpty()
 
     override fun windowMatches(windowTrimmed: List<String>, oldTrimmed: List<String>): Boolean =

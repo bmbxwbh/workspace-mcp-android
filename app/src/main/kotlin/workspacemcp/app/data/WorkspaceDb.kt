@@ -65,7 +65,7 @@ class WorkspaceDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, D
         }
 
     fun listFlow(): Flow<List<WorkspaceRecord>> = callbackFlow {
-        val listener = { trySend(list()) }
+        val listener: () -> Unit = { trySend(list()) }
         listener()
         val handle = dataVersion.addListener(listener)
         awaitClose { handle.close() }
@@ -102,7 +102,7 @@ class WorkspaceDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, D
     fun touchAccess(id: String, timestamp: Long) {
         writableDatabase.execSQL(
             "UPDATE $TABLE SET $COL_LAST_ACCESS = ? WHERE $COL_ID = ?",
-            arrayOf(timestamp, id),
+            arrayOf<Any>(timestamp, id),
         )
         dataVersion.bump()
     }

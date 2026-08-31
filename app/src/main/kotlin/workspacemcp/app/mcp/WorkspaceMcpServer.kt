@@ -19,7 +19,6 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.put
 import me.rerere.workspace.WorkspaceFileEntry
 import me.rerere.workspace.WorkspaceManager
-import workspacemcp.app.data.McpLog
 import workspacemcp.app.data.WorkspaceRecord
 import workspacemcp.app.domain.WorkspaceController
 import java.io.ByteArrayOutputStream
@@ -410,14 +409,10 @@ private fun Server.registerWorkspaceTools(controller: WorkspaceController) {
 private suspend fun <T> withIO(block: () -> T): T = withContext(Dispatchers.IO) { block() }
 
 private suspend fun CallToolRequest.runTool(block: suspend () -> String): CallToolResult = try {
-    val text = block()
-    McpLog.i("Tool", "$name -> ok (${text.length} chars)")
-    CallToolResult(content = listOf(TextContent(text = text)))
+    CallToolResult(content = listOf(TextContent(text = block())))
 } catch (e: CancellationException) {
-    McpLog.w("Tool", "$name cancelled")
     throw e
 } catch (e: Exception) {
-    McpLog.e("Tool", "$name failed", e)
     CallToolResult(
         content = listOf(TextContent(text = json { put("error", e.message ?: e.toString()) })),
         isError = true,

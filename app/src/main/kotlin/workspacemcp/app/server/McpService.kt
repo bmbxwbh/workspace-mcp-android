@@ -16,7 +16,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import workspacemcp.app.MainActivity
 import workspacemcp.app.R
 import workspacemcp.app.Runtime
-import workspacemcp.app.data.McpLog
 import java.net.NetworkInterface
 
 /**
@@ -40,7 +39,6 @@ class McpService : Service() {
                 updateNotification(handle!!.port)
                 _isRunning.value = true
             }.onFailure { error ->
-                McpLog.e("Service", "failed to start MCP server", error)
                 _lastError.value = error.message ?: error.toString()
                 stopSelf()
             }
@@ -49,7 +47,6 @@ class McpService : Service() {
     }
 
     override fun onDestroy() {
-        McpLog.i("Service", "service destroyed")
         handle?.stop()
         handle = null
         _isRunning.value = false

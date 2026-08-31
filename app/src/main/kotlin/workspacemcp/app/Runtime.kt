@@ -4,7 +4,6 @@ import android.content.Context
 import me.rerere.workspace.ProotShellRunner
 import me.rerere.workspace.RootfsInstaller
 import me.rerere.workspace.WorkspaceManager
-import workspacemcp.app.data.McpLog
 import workspacemcp.app.data.SettingsStore
 import workspacemcp.app.data.WorkspaceDb
 import java.io.File
@@ -21,7 +20,6 @@ object Runtime {
         synchronized(this) {
             initialized?.let { return it }
             val appContext = context.applicationContext
-            McpLog.init(appContext.filesDir)
             val manager = WorkspaceManager(
                 baseDir = File(appContext.filesDir, "workspaces"),
                 shellRunner = ProotShellRunner(

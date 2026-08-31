@@ -14,6 +14,7 @@ import io.ktor.server.engine.EmbeddedServer
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.plugins.cors.routing.CORS
 import io.ktor.server.request.httpMethod
+import io.ktor.server.request.origin
 import io.ktor.server.request.path
 import io.ktor.server.response.respondText
 import io.ktor.server.routing.get
@@ -21,6 +22,7 @@ import io.ktor.server.routing.routing
 import io.modelcontextprotocol.kotlin.sdk.server.mcp
 import io.modelcontextprotocol.kotlin.sdk.server.mcpStreamableHttp
 import workspacemcp.app.AppRuntime
+import workspacemcp.app.data.McpLog
 import workspacemcp.app.domain.WorkspaceController
 import workspacemcp.app.mcp.createWorkspaceMcpServer
 
@@ -29,7 +31,9 @@ class McpServerHandle(
     private val server: EmbeddedServer<CIOApplicationEngine, CIOApplicationEngine.Configuration>,
 ) {
     fun stop() {
+        McpLog.i("Server", "stopping server on port $port")
         server.stop(gracePeriodMillis = 500, timeoutMillis = 2000)
+        McpLog.i("Server", "server stopped")
     }
 }
 
@@ -45,6 +49,7 @@ fun startMcpServer(runtime: AppRuntime): McpServerHandle {
     val token = runtime.settings.token()
 
     val server = embeddedServer(CIO, host = "0.0.0.0", port = port) {
+        installRequestLogging()
         installCors()
         if (token != null) {
             installBearerAuth(token)
@@ -70,8 +75,32 @@ fun startMcpServer(runtime: AppRuntime): McpServerHandle {
             }
         }
     }
+    McpLog.i("Server", "starting on 0.0.0.0:$port (auth=${token != null})")
     server.start(wait = false)
+    McpLog.i("Server", "started on 0.0.0.0:$port")
     return McpServerHandle(port, server)
+}
+
+/** 记录每个进入的 HTTP 请求及其结果/异常, 是排查 502 / 连不通问题的关键依据 */
+private fun Application.installRequestLogging() {
+    intercept(ApplicationCallPipeline.Monitoring) {
+        val started = System.currentTimeMillis()
+        McpLog.i("HTTP", "-> ${call.request.httpMethod.value} ${call.request.path()} from ${call.request.origin.remoteHost}")
+        try {
+            proceed()
+        } catch (t: Throwable) {
+            McpLog.e(
+                "HTTP",
+                "<- ${call.request.httpMethod.value} ${call.request.path()} crashed after ${System.currentTimeMillis() - started}ms",
+                t,
+            )
+            throw t
+        } finally {
+            val took = System.currentTimeMillis() - started
+            val status = call.response.status()?.value ?: "none"
+            McpLog.i("HTTP", "<- ${call.request.httpMethod.value} ${call.request.path()} $status (${took}ms)")
+        }
+    }
 }
 
 private fun Application.installCors() {

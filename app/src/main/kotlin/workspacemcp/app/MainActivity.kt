@@ -142,6 +142,11 @@ private fun App(runtime: AppRuntime) {
                         }
                         Text("Streamable HTTP: $address/mcp")
                         Text("SSE: $address/sse")
+                        Text(
+                            "Log: ${context.filesDir.path}/logs/mcp-<date>.log",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                         serverError?.let { Text("Error: $it", color = MaterialTheme.colorScheme.error) }
 
                         OutlinedTextField(

@@ -33,6 +33,11 @@ android {
     }
 
     packaging {
+        // proot 的 libproot_exec.so / libproot_loader.so 需要解压到磁盘才能作为可执行文件运行
+        // (默认的现代打包方式将 .so 留在 APK 内, nativeLibraryDir 下没有真实文件)
+        jniLibs {
+            useLegacyPackaging = true
+        }
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
             excludes += "/META-INF/INDEX.LIST"

@@ -65,9 +65,7 @@ dependencies {
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.android)
 
-    implementation(libs.modelcontextprotocol.kotlin.sdk.server)
     implementation(libs.ktor.server.cio)
-    implementation(libs.ktor.server.cors)
     implementation(libs.slf4j.android)
     implementation("io.github.java-diff-utils:java-diff-utils:4.17")
 

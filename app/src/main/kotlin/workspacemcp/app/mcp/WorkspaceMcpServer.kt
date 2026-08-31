@@ -1,17 +1,9 @@
 package workspacemcp.app.mcp
 
-import io.modelcontextprotocol.kotlin.sdk.server.Server
-import io.modelcontextprotocol.kotlin.sdk.server.ServerOptions
-import io.modelcontextprotocol.kotlin.sdk.types.CallToolRequest
-import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
-import io.modelcontextprotocol.kotlin.sdk.types.Implementation
-import io.modelcontextprotocol.kotlin.sdk.types.ServerCapabilities
-import io.modelcontextprotocol.kotlin.sdk.types.TextContent
-import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -28,37 +20,30 @@ private const val MAX_READ_FILE_BYTES = 8L * 1024 * 1024
 private const val MAX_WRITE_FILE_BYTES = 8L * 1024 * 1024
 
 /**
- * 每个连接新建一个 Server (与 SDK 的 per-connection factory 语义一致),
- * 共享同一个 [WorkspaceController]/[WorkspaceManager].
+ * MCP 工具定义: 与传输层解耦, 由 McpHost 的 JSON-RPC 分发器调用。
+ * handler 抛出的异常由传输层统一包装为 isError 的 CallToolResult。
  */
-fun createWorkspaceMcpServer(controller: WorkspaceController): Server {
-    val server = Server(
-        Implementation(name = "workspace-mcp-server", version = "1.0.0"),
-        ServerOptions(
-            capabilities = ServerCapabilities(
-                tools = ServerCapabilities.Tools(listChanged = true),
-            ),
-        ),
-    )
-    server.registerWorkspaceTools(controller)
-    return server
-}
+class WorkspaceTool(
+    val name: String,
+    val description: String,
+    val properties: JsonObject,
+    val required: List<String>,
+    val handler: suspend (JsonObject?) -> String,
+)
 
-private fun Server.registerWorkspaceTools(controller: WorkspaceController) {
+fun createWorkspaceTools(controller: WorkspaceController): List<WorkspaceTool> {
     val manager = controller.manager
 
-    // ===== 工作区管理 (保留原 App 的创建/切换能力) =====
+    return listOf(
+        // ===== 工作区管理 (保留原 App 的创建/切换能力) =====
 
-    addTool(
-        name = "workspace_create",
-        description = "Create a new workspace and select it as current. " +
-            "Each workspace has an isolated files area and its own optional Linux rootfs.",
-        inputSchema = schema(
+        tool(
+            name = "workspace_create",
+            description = "Create a new workspace and select it as current. " +
+                "Each workspace has an isolated files area and its own optional Linux rootfs.",
             "name" to propString("Name of the new workspace, must be unique"),
-        ),
-    ) { request ->
-        request.runTool {
-            val name = request.arguments.requireString("name")
+        ) { args ->
+            val name = args.requireString("name")
             withIO { controller.create(name) }.let {
                 json {
                     put("id", it.id)
@@ -68,33 +53,26 @@ private fun Server.registerWorkspaceTools(controller: WorkspaceController) {
                     put("current", true)
                 }
             }
-        }
-    }
+        },
 
-    addTool(
-        name = "workspace_list",
-        description = "List all workspaces. The current workspace is marked with current=true.",
-        inputSchema = schema(),
-    ) { request ->
-        request.runTool {
+        tool(
+            name = "workspace_list",
+            description = "List all workspaces. The current workspace is marked with current=true.",
+        ) {
             val current = controller.current()?.id
             withIO { controller.list() }.joinToString(
                 prefix = "[",
                 separator = ",",
                 postfix = "]",
             ) { it.toJsonString(current == it.id) }
-        }
-    }
+        },
 
-    addTool(
-        name = "workspace_switch",
-        description = "Switch the current workspace. Later file/shell tool calls will act on it.",
-        inputSchema = schema(
+        tool(
+            name = "workspace_switch",
+            description = "Switch the current workspace. Later file/shell tool calls will act on it.",
             "id" to propString("Workspace id returned by workspace_list / workspace_create"),
-        ),
-    ) { request ->
-        request.runTool {
-            val id = request.arguments.requireString("id")
+        ) { args ->
+            val id = args.requireString("id")
             withIO { controller.switch(id) }.let {
                 json {
                     put("id", it.id)
@@ -103,15 +81,12 @@ private fun Server.registerWorkspaceTools(controller: WorkspaceController) {
                     put("current", true)
                 }
             }
-        }
-    }
+        },
 
-    addTool(
-        name = "workspace_current",
-        description = "Get the currently selected workspace.",
-        inputSchema = schema(),
-    ) { request ->
-        request.runTool {
+        tool(
+            name = "workspace_current",
+            description = "Get the currently selected workspace.",
+        ) {
             val record = withIO { controller.requireCurrent() }
             json {
                 put("id", record.id)
@@ -119,92 +94,72 @@ private fun Server.registerWorkspaceTools(controller: WorkspaceController) {
                 put("root", record.root)
                 put("hasRootfs", manager.hasRootfs(record.root))
             }
-        }
-    }
+        },
 
-    addTool(
-        name = "workspace_rename",
-        description = "Rename a workspace.",
-        inputSchema = schema(
+        tool(
+            name = "workspace_rename",
+            description = "Rename a workspace.",
             "id" to propString("Workspace id"),
             "name" to propString("New unique name"),
-        ),
-    ) { request ->
-        request.runTool {
-            val id = request.arguments.requireString("id")
-            val name = request.arguments.requireString("name")
+        ) { args ->
+            val id = args.requireString("id")
+            val name = args.requireString("name")
             withIO { controller.rename(id, name) }.let {
                 json { put("id", it.id); put("name", it.name) }
             }
-        }
-    }
+        },
 
-    addTool(
-        name = "workspace_delete",
-        description = "Delete a workspace together with its files and rootfs. Irreversible.",
-        inputSchema = schema(
+        tool(
+            name = "workspace_delete",
+            description = "Delete a workspace together with its files and rootfs. Irreversible.",
             "id" to propString("Workspace id"),
-        ),
-    ) { request ->
-        request.runTool {
-            val id = request.arguments.requireString("id")
+        ) { args ->
+            val id = args.requireString("id")
             val deleted = withIO { controller.delete(id) }
             json { put("deleted", deleted) }
-        }
-    }
+        },
 
-    addTool(
-        name = "workspace_install_rootfs",
-        description = "Download and install a Linux rootfs (default: Ubuntu 24.04 base arm64) into a workspace. " +
-            "Required before workspace_shell can run. This is a long-running operation (hundreds of MB).",
-        inputSchema = schema(
+        tool(
+            name = "workspace_install_rootfs",
+            description = "Download and install a Linux rootfs (default: Ubuntu 24.04 base arm64) into a workspace. " +
+                "Required before workspace_shell can run. This is a long-running operation (hundreds of MB).",
             "id" to propString("Workspace id. Defaults to the current workspace.", optional = true),
             "url" to propString("Rootfs tar.gz/tar.xz download url. Defaults to Ubuntu 24.04 base arm64.", optional = true),
-        ),
-    ) { request ->
-        request.runTool {
-            val id = request.arguments.optString("id") ?: withIO { controller.requireCurrent().id }
-            val url = request.arguments.optString("url") ?: WorkspaceController.DEFAULT_ROOTFS_URL
+        ) { args ->
+            val id = args.optString("id") ?: withIO { controller.requireCurrent().id }
+            val url = args.optString("url") ?: WorkspaceController.DEFAULT_ROOTFS_URL
             controller.installRootfs(id, url)
             json { put("id", id); put("installed", true); put("url", url) }
-        }
-    }
+        },
 
-    // ===== 文件工具 (Rootfs 绝对路径, 与原 App 的 agent 工具语义一致) =====
+        // ===== 文件工具 (Rootfs 绝对路径, 与原 App 的 agent 工具语义一致) =====
 
-    addTool(
-        name = "workspace_read_file",
-        description = "Read a UTF-8 text file in the current workspace. Paths must be absolute inside Rootfs. " +
-            "Use /workspace for the workspace files area.",
-        inputSchema = schema(
+        tool(
+            name = "workspace_read_file",
+            description = "Read a UTF-8 text file in the current workspace. Paths must be absolute inside Rootfs. " +
+                "Use /workspace for the workspace files area.",
             "path" to propString("Absolute path inside Rootfs, e.g. /workspace/src/main.kt"),
-        ),
-    ) { request ->
-        request.runTool {
+        ) { args ->
             val root = withIO { controller.requireCurrent().root }
-            val path = request.arguments.requireAbsolutePath("path")
+            val path = args.requireAbsolutePath("path")
             withIO {
                 val text = readRootfsText(manager, root, path)
                 json { put("path", path); put("text", text) }
             }
-        }
-    }
+        },
 
-    addTool(
-        name = "workspace_write_file",
-        description = "Write a UTF-8 text file in the current workspace. Paths must be absolute inside Rootfs. " +
-            "Use /workspace for the workspace files area.",
-        inputSchema = schema(
+        tool(
+            name = "workspace_write_file",
+            description = "Write a UTF-8 text file in the current workspace. Paths must be absolute inside Rootfs. " +
+                "Use /workspace for the workspace files area.",
             "path" to propString("Absolute path inside Rootfs"),
             "text" to propString("UTF-8 text content to write"),
             "overwrite" to propBoolean("Whether to overwrite an existing file. Defaults to true.", optional = true),
-        ),
-    ) { request ->
-        request.runTool {
+        ) { args ->
             val root = withIO { controller.requireCurrent().root }
-            val path = request.arguments.requireAbsolutePath("path")
-            val text = request.arguments.requireString("text")
-            val overwrite = request.arguments.optBool("overwrite") ?: true
+            val path = args.requireAbsolutePath("path")
+            val text = args.requireString("text")
+            val overwrite = args.optBool("overwrite") ?: true
             val bytes = text.toByteArray(Charsets.UTF_8)
             require(bytes.size <= MAX_WRITE_FILE_BYTES) { "Content is too large to write: ${bytes.size} bytes" }
             withIO { writeRootfsText(manager, root, path, text, overwrite) }.let {
@@ -214,28 +169,24 @@ private fun Server.registerWorkspaceTools(controller: WorkspaceController) {
                     put("updatedAt", it.updatedAt)
                 }
             }
-        }
-    }
+        },
 
-    addTool(
-        name = "workspace_edit_file",
-        description = "Edit a UTF-8 text file in the current workspace by replacing old_text with new_text. " +
-            "Paths must be absolute inside Rootfs. Use /workspace for the workspace files area. " +
-            "By default old_text must occur exactly once; set replace_all=true to replace every occurrence. " +
-            "If no exact match is found, whitespace-tolerant line matching is attempted automatically.",
-        inputSchema = schema(
+        tool(
+            name = "workspace_edit_file",
+            description = "Edit a UTF-8 text file in the current workspace by replacing old_text with new_text. " +
+                "Paths must be absolute inside Rootfs. Use /workspace for the workspace files area. " +
+                "By default old_text must occur exactly once; set replace_all=true to replace every occurrence. " +
+                "If no exact match is found, whitespace-tolerant line matching is attempted automatically.",
             "path" to propString("Absolute path inside Rootfs"),
             "old_text" to propString("Exact text to replace"),
             "new_text" to propString("Replacement text"),
             "replace_all" to propBoolean("Whether to replace every occurrence. Defaults to false.", optional = true),
-        ),
-    ) { request ->
-        request.runTool {
+        ) { args ->
             val root = withIO { controller.requireCurrent().root }
-            val path = request.arguments.requireAbsolutePath("path")
-            val oldText = request.arguments.requireString("old_text")
-            val newText = request.arguments.requireString("new_text")
-            val replaceAll = request.arguments.optBool("replace_all") ?: false
+            val path = args.requireAbsolutePath("path")
+            val oldText = args.requireString("old_text")
+            val newText = args.requireString("new_text")
+            val replaceAll = args.optBool("replace_all") ?: false
             require(oldText.isNotEmpty()) { "old_text must not be empty" }
 
             withIO {
@@ -256,26 +207,22 @@ private fun Server.registerWorkspaceTools(controller: WorkspaceController) {
                     if (diff != null) put("diff", diff)
                 }.toString()
             }
-        }
-    }
+        },
 
-    addTool(
-        name = "workspace_shell",
-        description = "Run a shell command in the current workspace Rootfs (via PRoot). " +
-            "The workspace files area is mounted at /workspace. Use cwd for a path relative to the files root. " +
-            "Requires Rootfs to be installed (workspace_install_rootfs).",
-        inputSchema = schema(
+        tool(
+            name = "workspace_shell",
+            description = "Run a shell command in the current workspace Rootfs (via PRoot). " +
+                "The workspace files area is mounted at /workspace. Use cwd for a path relative to the files root. " +
+                "Requires Rootfs to be installed (workspace_install_rootfs).",
             "command" to propString("Shell command to run"),
             "cwd" to propString("Working directory relative to the workspace files root. Defaults to root.", optional = true),
             "timeout" to propInt("Command timeout in seconds. Defaults to 30, max 600.", optional = true),
-        ),
-    ) { request ->
-        request.runTool {
+        ) { args ->
             val root = withIO { controller.requireCurrent().root }
-            val command = request.arguments.requireString("command")
-            val cwd = (request.arguments.optString("cwd") ?: "")
+            val command = args.requireString("command")
+            val cwd = (args.optString("cwd") ?: "")
                 .removePrefix("/workspace/").removePrefix("/workspace")
-            val timeoutMillis = request.arguments.optInt("timeout")?.toLong()
+            val timeoutMillis = args.optInt("timeout")?.toLong()
                 ?.coerceIn(1L, SHELL_TIMEOUT_MAX_SECONDS)?.times(1_000L)
                 ?: WorkspaceManager.DEFAULT_COMMAND_TIMEOUT_MS
             withIO { manager.executeCommand(root, command, cwd, timeoutMillis) }.let { result ->
@@ -287,22 +234,18 @@ private fun Server.registerWorkspaceTools(controller: WorkspaceController) {
                     if (result.truncated) put("truncated", true)
                 }.toString()
             }
-        }
-    }
+        },
 
-    // ===== 文件区工具 (files 区相对路径, 对应原 App 的文件管理功能) =====
+        // ===== 文件区工具 (files 区相对路径, 对应原 App 的文件管理功能) =====
 
-    addTool(
-        name = "workspace_list_files",
-        description = "List entries in the current workspace files area (/workspace). " +
-            "Path is relative to the files root, empty for the root itself.",
-        inputSchema = schema(
+        tool(
+            name = "workspace_list_files",
+            description = "List entries in the current workspace files area (/workspace). " +
+                "Path is relative to the files root, empty for the root itself.",
             "path" to propString("Directory path relative to the files root. Defaults to root.", optional = true),
-        ),
-    ) { request ->
-        request.runTool {
+        ) { args ->
             val record = withIO { controller.requireCurrent() }
-            val path = request.arguments.optString("path").orEmpty()
+            val path = args.optString("path").orEmpty()
             withIO { manager.listFiles(record.root, path) }.let { entries ->
                 json {
                     put("path", path.ifBlank { "/" })
@@ -310,59 +253,47 @@ private fun Server.registerWorkspaceTools(controller: WorkspaceController) {
                     put("entries", entries.toJsonArray())
                 }
             }
-        }
-    }
+        },
 
-    addTool(
-        name = "workspace_delete_file",
-        description = "Delete a file or directory in the current workspace files area. " +
-            "Directory delete requires recursive=true.",
-        inputSchema = schema(
+        tool(
+            name = "workspace_delete_file",
+            description = "Delete a file or directory in the current workspace files area. " +
+                "Directory delete requires recursive=true.",
             "path" to propString("Path relative to the files root"),
             "recursive" to propBoolean("Required true when deleting a directory.", optional = true),
-        ),
-    ) { request ->
-        request.runTool {
+        ) { args ->
             val record = withIO { controller.requireCurrent() }
-            val path = request.arguments.requireString("path")
-            val recursive = request.arguments.optBool("recursive") ?: false
+            val path = args.requireString("path")
+            val recursive = args.optBool("recursive") ?: false
             val deleted = withIO { manager.deleteFile(record.root, path, recursive) }
             json { put("deleted", deleted) }
-        }
-    }
+        },
 
-    addTool(
-        name = "workspace_move_file",
-        description = "Move or rename a file inside the current workspace files area.",
-        inputSchema = schema(
+        tool(
+            name = "workspace_move_file",
+            description = "Move or rename a file inside the current workspace files area.",
             "source" to propString("Source path relative to the files root"),
             "target" to propString("Target path relative to the files root"),
             "overwrite" to propBoolean("Whether to overwrite the target if it exists. Defaults to false.", optional = true),
-        ),
-    ) { request ->
-        request.runTool {
+        ) { args ->
             val record = withIO { controller.requireCurrent() }
-            val source = request.arguments.requireString("source")
-            val target = request.arguments.requireString("target")
-            val overwrite = request.arguments.optBool("overwrite") ?: false
+            val source = args.requireString("source")
+            val target = args.requireString("target")
+            val overwrite = args.optBool("overwrite") ?: false
             withIO { manager.moveFile(record.root, source, target, overwrite) }.let {
                 json { put("path", it.path); put("sizeBytes", it.sizeBytes) }
             }
-        }
-    }
+        },
 
-    addTool(
-        name = "workspace_glob",
-        description = "Find files in the current workspace files area by glob pattern (e.g. **/*.kt).",
-        inputSchema = schema(
+        tool(
+            name = "workspace_glob",
+            description = "Find files in the current workspace files area by glob pattern (e.g. **/*.kt).",
             "pattern" to propString("Glob pattern, matched against paths relative to the files root"),
             "path" to propString("Base directory relative to the files root. Defaults to root.", optional = true),
-        ),
-    ) { request ->
-        request.runTool {
+        ) { args ->
             val record = withIO { controller.requireCurrent() }
-            val pattern = request.arguments.requireString("pattern")
-            val path = request.arguments.optString("path").orEmpty()
+            val pattern = args.requireString("pattern")
+            val path = args.optString("path").orEmpty()
             withIO { manager.glob(record.root, pattern, path) }.let { entries ->
                 json {
                     put("pattern", pattern)
@@ -370,27 +301,23 @@ private fun Server.registerWorkspaceTools(controller: WorkspaceController) {
                     put("entries", entries.toJsonArray())
                 }
             }
-        }
-    }
+        },
 
-    addTool(
-        name = "workspace_grep",
-        description = "Search text in the current workspace files area.",
-        inputSchema = schema(
+        tool(
+            name = "workspace_grep",
+            description = "Search text in the current workspace files area.",
             "query" to propString("Search query, plain text or regex"),
             "path" to propString("Base directory relative to the files root. Defaults to root.", optional = true),
             "regex" to propBoolean("Treat query as regex. Defaults to false.", optional = true),
             "ignore_case" to propBoolean("Case-insensitive search. Defaults to true.", optional = true),
             "include_glob" to propString("Only search files matching this glob, e.g. *.kt", optional = true),
-        ),
-    ) { request ->
-        request.runTool {
+        ) { args ->
             val record = withIO { controller.requireCurrent() }
-            val query = request.arguments.requireString("query")
-            val path = request.arguments.optString("path").orEmpty()
-            val regex = request.arguments.optBool("regex") ?: false
-            val ignoreCase = request.arguments.optBool("ignore_case") ?: true
-            val includeGlob = request.arguments.optString("include_glob")
+            val query = args.requireString("query")
+            val path = args.optString("path").orEmpty()
+            val regex = args.optBool("regex") ?: false
+            val ignoreCase = args.optBool("ignore_case") ?: true
+            val includeGlob = args.optString("include_glob")
             withIO {
                 manager.grep(record.root, query, path, regex, ignoreCase, includeGlob)
             }.let { matches ->
@@ -400,24 +327,13 @@ private fun Server.registerWorkspaceTools(controller: WorkspaceController) {
                     put("matches", matches.toJsonArray())
                 }
             }
-        }
-    }
+        },
+    )
 }
 
 // ===== helpers =====
 
 private suspend fun <T> withIO(block: () -> T): T = withContext(Dispatchers.IO) { block() }
-
-private suspend fun CallToolRequest.runTool(block: suspend () -> String): CallToolResult = try {
-    CallToolResult(content = listOf(TextContent(text = block())))
-} catch (e: CancellationException) {
-    throw e
-} catch (e: Exception) {
-    CallToolResult(
-        content = listOf(TextContent(text = json { put("error", e.message ?: e.toString()) })),
-        isError = true,
-    )
-}
 
 private fun json(block: kotlinx.serialization.json.JsonObjectBuilder.() -> Unit): String =
     buildJsonObject(block).toString()
@@ -503,15 +419,21 @@ private fun writeRootfsText(
 
 private class Prop(val json: JsonObject, val required: Boolean)
 
-private fun schema(vararg props: Pair<String, Prop>): ToolSchema = ToolSchema(
-    properties = kotlinx.serialization.json.buildJsonObject {
-        props.forEach { (name, prop) -> put(name, prop.json) }
-    },
-    required = props.filter { it.second.required }.map { it.first }.ifEmpty { null },
+private fun tool(
+    name: String,
+    description: String,
+    vararg props: Pair<String, Prop>,
+    handler: suspend (JsonObject?) -> String,
+): WorkspaceTool = WorkspaceTool(
+    name = name,
+    description = description,
+    properties = buildJsonObject { props.forEach { (n, p) -> put(n, p.json) } },
+    required = props.filter { it.second.required }.map { it.first },
+    handler = handler,
 )
 
 private fun propString(description: String, optional: Boolean = false): Prop = Prop(
-    json = kotlinx.serialization.json.buildJsonObject {
+    json = buildJsonObject {
         put("type", "string")
         put("description", description)
     },
@@ -519,7 +441,7 @@ private fun propString(description: String, optional: Boolean = false): Prop = P
 )
 
 private fun propBoolean(description: String, optional: Boolean = false): Prop = Prop(
-    json = kotlinx.serialization.json.buildJsonObject {
+    json = buildJsonObject {
         put("type", "boolean")
         put("description", description)
     },
@@ -527,7 +449,7 @@ private fun propBoolean(description: String, optional: Boolean = false): Prop = 
 )
 
 private fun propInt(description: String, optional: Boolean = false): Prop = Prop(
-    json = kotlinx.serialization.json.buildJsonObject {
+    json = buildJsonObject {
         put("type", "integer")
         put("description", description)
     },
@@ -561,10 +483,10 @@ private fun JsonObject?.requireAbsolutePath(name: String): String {
 }
 
 private fun kotlinx.serialization.json.JsonElement.asStringOrNull(): String? =
-    (this as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull
+    (this as? JsonPrimitive)?.contentOrNull
 
 private fun kotlinx.serialization.json.JsonElement.asBooleanOrNull(): Boolean? =
-    (this as? kotlinx.serialization.json.JsonPrimitive)?.booleanOrNull
+    (this as? JsonPrimitive)?.booleanOrNull
 
 private fun kotlinx.serialization.json.JsonElement.asIntOrNull(): Int? =
-    (this as? kotlinx.serialization.json.JsonPrimitive)?.intOrNull
+    (this as? JsonPrimitive)?.intOrNull

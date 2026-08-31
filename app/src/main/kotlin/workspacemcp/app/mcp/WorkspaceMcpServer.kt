@@ -148,7 +148,8 @@ private fun Server.registerWorkspaceTools(controller: WorkspaceController) {
     ) { request ->
         request.runTool {
             val id = request.arguments.requireString("id")
-            json { put("deleted", withIO { controller.delete(id) }) }
+            val deleted = withIO { controller.delete(id) }
+            json { put("deleted", deleted) }
         }
     }
 
@@ -325,7 +326,8 @@ private fun Server.registerWorkspaceTools(controller: WorkspaceController) {
             val record = withIO { controller.requireCurrent() }
             val path = request.arguments.requireString("path")
             val recursive = request.arguments.optBool("recursive") ?: false
-            json { put("deleted", withIO { manager.deleteFile(record.root, path, recursive) }) }
+            val deleted = withIO { manager.deleteFile(record.root, path, recursive) }
+            json { put("deleted", deleted) }
         }
     }
 

@@ -13,6 +13,7 @@ import io.ktor.server.cio.CIOApplicationEngine
 import io.ktor.server.engine.EmbeddedServer
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.plugins.cors.routing.CORS
+import io.ktor.server.request.httpMethod
 import io.ktor.server.request.path
 import io.ktor.server.response.respondText
 import io.ktor.server.routing.get
@@ -64,7 +65,7 @@ fun startMcpServer(runtime: AppRuntime): McpServerHandle {
             get("/") {
                 call.respondText(
                     "workspace-mcp-server is running. Endpoints: /mcp (Streamable HTTP), /sse (SSE)",
-                    ContentType.TextPlain,
+                    ContentType.Text.Plain,
                 )
             }
         }
@@ -95,7 +96,7 @@ private fun Application.installBearerAuth(token: String) {
         if (call.request.path() == "/") return@intercept
         val provided = call.request.headers[HttpHeaders.Authorization]
         if (provided != "Bearer $token") {
-            call.respondText("Unauthorized", ContentType.TextPlain, HttpStatusCode.Unauthorized)
+            call.respondText("Unauthorized", ContentType.Text.Plain, HttpStatusCode.Unauthorized)
             finish()
         }
     }

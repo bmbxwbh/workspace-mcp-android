@@ -45,11 +45,19 @@ class SettingsStore(context: Context) {
         prefs.edit().putBoolean(KEY_SERVICE_ENABLED, enabled).apply()
     }
 
+    /** 悬浮窗保活是否开启 */
+    fun floatingEnabled(): Boolean = prefs.getBoolean(KEY_FLOATING_ENABLED, false)
+
+    fun setFloatingEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_FLOATING_ENABLED, enabled).apply()
+    }
+
     companion object {
         const val DEFAULT_PORT = 8080
         private const val KEY_PORT = "port"
         private const val KEY_TOKEN = "token"
         private const val KEY_CURRENT_WORKSPACE = "current_workspace_id"
         private const val KEY_SERVICE_ENABLED = "service_enabled"
+        private const val KEY_FLOATING_ENABLED = "floating_enabled"
     }
 }

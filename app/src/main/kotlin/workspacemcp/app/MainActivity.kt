@@ -1,5 +1,8 @@
 package workspacemcp.app
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -86,6 +89,15 @@ private fun App(runtime: AppRuntime) {
     val rootfsProgress = remember { MutableStateFlow<RootfsInstallProgress?>(null) }
     val rootfsProgressState by rootfsProgress.collectAsState()
     val message = remember { mutableStateOf<String?>(null) }
+    val floatingEnabled = remember { mutableStateOf(runtime.settings.floatingEnabled()) }
+    val hasOverlayPermission = remember { mutableStateOf(McpService.hasOverlayPermission(context)) }
+    val notificationGranted = remember {
+        mutableStateOf(
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+                PackageManager.PERMISSION_GRANTED,
+        )
+    }
 
     fun refresh() {
         workspaces.value = controller.list()
@@ -94,15 +106,44 @@ private fun App(runtime: AppRuntime) {
 
     LaunchedEffect(Unit) { refresh() }
 
+    // Activity 每次回到 RESUMED (含从系统权限设置页返回) 时刷新权限状态
+    val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                hasOverlayPermission.value = McpService.hasOverlayPermission(context)
+                if (hasOverlayPermission.value && floatingEnabled.value) {
+                    workspacemcp.app.server.FloatingWindow.show(context)
+                }
+                notificationGranted.value = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                    context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+                    PackageManager.PERMISSION_GRANTED
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    // Android 13+ 首次进入请求通知权限 (只弹一次, 拒绝后由用户点"授予通知权限"按钮)
+    var notificationRequested by remember { mutableStateOf(false) }
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        if (!notificationGranted.value && !notificationRequested) {
+            notificationRequested = true
+            (context as? ComponentActivity)?.requestPermissions(
+                arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1001,
+            )
+        }
+    }
+
     val lanIp = remember { McpService.lanIpAddress() }
 
     Scaffold(
         topBar = {
-            TopAppBar(title = { Text("Workspace MCP Server") })
+            TopAppBar(title = { Text("工作区 MCP 服务器") })
         },
         floatingActionButton = {
             FloatingActionButton(onClick = { showCreate.value = true }) {
-                Icon(Icons.Filled.Add, contentDescription = "Create workspace")
+                Icon(Icons.Filled.Add, contentDescription = "新建工作区")
             }
         },
     ) { padding ->
@@ -122,10 +163,10 @@ private fun App(runtime: AppRuntime) {
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Text("MCP Server", style = MaterialTheme.typography.titleMedium)
+                            Text("MCP 服务", style = MaterialTheme.typography.titleMedium)
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 if (running) {
-                                    Text("Running", style = MaterialTheme.typography.bodySmall)
+                                    Text("运行中", style = MaterialTheme.typography.bodySmall)
                                 }
                                 Switch(
                                     checked = running,
@@ -138,16 +179,16 @@ private fun App(runtime: AppRuntime) {
                         val address = if (running) {
                             "http://${lanIp ?: "0.0.0.0"}:${port.value}"
                         } else {
-                            "Service stopped"
+                            "服务未启动"
                         }
-                        Text("Streamable HTTP: $address/mcp")
-                        Text("SSE: $address/sse")
-                        serverError?.let { Text("Error: $it", color = MaterialTheme.colorScheme.error) }
+                        Text("连接地址: $address/mcp")
+                        Text("SSE 地址: $address/sse")
+                        serverError?.let { Text("错误: $it", color = MaterialTheme.colorScheme.error) }
 
                         OutlinedTextField(
                             value = port.value,
                             onValueChange = { port.value = it.filter(Char::isDigit).takeIf(String::isNotBlank) ?: "" },
-                            label = { Text("Port") },
+                            label = { Text("端口") },
                             modifier = Modifier.fillMaxWidth(),
                             enabled = !running,
                             singleLine = true,
@@ -155,7 +196,7 @@ private fun App(runtime: AppRuntime) {
                         OutlinedTextField(
                             value = token.value,
                             onValueChange = { token.value = it },
-                            label = { Text("Bearer token (optional)") },
+                            label = { Text("访问令牌 (可选)") },
                             modifier = Modifier.fillMaxWidth(),
                             enabled = !running,
                             singleLine = true,
@@ -166,18 +207,63 @@ private fun App(runtime: AppRuntime) {
                                 runCatching {
                                     runtime.settings.setPort(newPort)
                                     runtime.settings.setToken(token.value)
-                                }.onSuccess { message.value = "Settings saved" }
+                                }.onSuccess { message.value = "设置已保存" }
                                     .onFailure { message.value = it.message }
                             },
                             enabled = !running,
-                        ) { Text("Save settings") }
+                        ) { Text("保存设置") }
+
+                        if (!notificationGranted.value) {
+                            TextButton(onClick = {
+                                McpService.requestNotificationPermission(context)
+                            }) { Text("授予通知权限") }
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column {
+                                Text("悬浮窗保活")
+                                Text(
+                                    "息屏/后台保持服务在线, 可拖动小球",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            Switch(
+                                checked = floatingEnabled.value && hasOverlayPermission.value,
+                                onCheckedChange = { enabled ->
+                                    if (enabled && !hasOverlayPermission.value) {
+                                        McpService.requestOverlayPermission(context)
+                                        message.value = "请先授予悬浮窗权限, 授予后再打开开关"
+                                    } else {
+                                        runtime.settings.setFloatingEnabled(enabled)
+                                        floatingEnabled.value = enabled
+                                        if (enabled) {
+                                            workspacemcp.app.server.FloatingWindow.show(context)
+                                        } else {
+                                            workspacemcp.app.server.FloatingWindow.dismiss(context)
+                                        }
+                                    }
+                                },
+                            )
+                        }
+                        if (!hasOverlayPermission.value) {
+                            Text(
+                                "未授予悬浮窗权限, 点击上方开关前往系统设置授权",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        }
                         message.value?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                     }
                 }
             }
 
             item {
-                Text("Workspaces", style = MaterialTheme.typography.titleMedium)
+                Text("工作区", style = MaterialTheme.typography.titleMedium)
             }
 
             items(workspaces.value, key = { it.id }) { workspace ->
@@ -218,17 +304,17 @@ private fun App(runtime: AppRuntime) {
     deleteTarget.value?.let { target ->
         AlertDialog(
             onDismissRequest = { deleteTarget.value = null },
-            title = { Text("Delete workspace") },
-            text = { Text("Delete \"${target.name}\" with all its files and rootfs? This cannot be undone.") },
+            title = { Text("删除工作区") },
+            text = { Text("确定删除「${target.name}」及其全部文件和 rootfs 吗？此操作不可撤销。") },
             confirmButton = {
                 TextButton(onClick = {
                     controller.delete(target.id)
                     deleteTarget.value = null
                     refresh()
-                }) { Text("Delete") }
+                }) { Text("删除") }
             },
             dismissButton = {
-                TextButton(onClick = { deleteTarget.value = null }) { Text("Cancel") }
+                TextButton(onClick = { deleteTarget.value = null }) { Text("取消") }
             },
         )
     }
@@ -238,21 +324,21 @@ private fun App(runtime: AppRuntime) {
             onDismissRequest = {
                 if (rootfsProgressState == null) rootfsTarget.value = null
             },
-            title = { Text("Install rootfs") },
+            title = { Text("安装 rootfs") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Download Ubuntu 24.04 base (arm64) into \"${target.name}\"? This may take a while.")
+                    Text("下载 Ubuntu 24.04 基础版 (arm64) 到「${target.name}」？可能需要较长时间。")
                     rootfsProgressState?.let { progress ->
                         when (progress.stage) {
                             me.rerere.workspace.RootfsInstallStage.DOWNLOADING -> {
                                 val mb = progress.bytesRead / 1024 / 1024
                                 val total = progress.totalBytes?.let { "${it / 1024 / 1024}MB" } ?: "?"
-                                Text("Downloading… $mb MB / $total")
+                                Text("下载中… $mb MB / $total")
                             }
                             me.rerere.workspace.RootfsInstallStage.EXTRACTING ->
-                                Text("Extracting… ${progress.entriesExtracted} entries")
+                                Text("解压中… 已解压 ${progress.entriesExtracted} 项")
                             me.rerere.workspace.RootfsInstallStage.INSTALLED ->
-                                Text("Rootfs installed")
+                                Text("rootfs 安装完成")
                         }
                         LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                     }
@@ -269,19 +355,19 @@ private fun App(runtime: AppRuntime) {
                             }.onSuccess {
                                 rootfsProgress.value = null
                                 rootfsTarget.value = null
-                                message.value = "Rootfs installed"
+                                message.value = "rootfs 安装完成"
                             }.onFailure {
                                 rootfsProgress.value = null
                                 rootfsTarget.value = null
                                 message.value = it.message
                             }
                         }
-                    }) { Text("Install") }
+                    }) { Text("安装") }
                 }
             },
             dismissButton = {
                 if (rootfsProgressState == null) {
-                    TextButton(onClick = { rootfsTarget.value = null }) { Text("Cancel") }
+                    TextButton(onClick = { rootfsTarget.value = null }) { Text("取消") }
                 }
             },
         )
@@ -309,7 +395,7 @@ private fun WorkspaceCard(
                 Column(Modifier.weight(1f)) {
                     Text(workspace.name, style = MaterialTheme.typography.titleMedium)
                     Text(
-                        if (hasRootfs) "rootfs ready" else "no rootfs",
+                        if (hasRootfs) "rootfs 已就绪" else "未安装 rootfs",
                         style = MaterialTheme.typography.bodySmall,
                         color = if (hasRootfs) {
                             MaterialTheme.colorScheme.primary
@@ -329,10 +415,10 @@ private fun WorkspaceCard(
                     Text(
                         when (it.stage) {
                             me.rerere.workspace.RootfsInstallStage.DOWNLOADING ->
-                                "Downloading… ${it.bytesRead / 1024 / 1024} MB"
+                                "下载中… ${it.bytesRead / 1024 / 1024} MB"
                             me.rerere.workspace.RootfsInstallStage.EXTRACTING ->
-                                "Extracting… ${it.entriesExtracted} entries"
-                            me.rerere.workspace.RootfsInstallStage.INSTALLED -> "Installed"
+                                "解压中… 已解压 ${it.entriesExtracted} 项"
+                            me.rerere.workspace.RootfsInstallStage.INSTALLED -> "已安装"
                         },
                         style = MaterialTheme.typography.bodySmall,
                     )
@@ -340,11 +426,11 @@ private fun WorkspaceCard(
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 TextButton(onClick = onInstallRootfs, enabled = !rootfsInstalling) {
-                    Text(if (hasRootfs) "Reinstall rootfs" else "Install rootfs")
+                    Text(if (hasRootfs) "重新安装 rootfs" else "安装 rootfs")
                 }
                 Spacer(Modifier.weight(1f))
                 IconButton(onClick = onDelete) {
-                    Icon(Icons.Filled.Delete, contentDescription = "Delete workspace")
+                    Icon(Icons.Filled.Delete, contentDescription = "删除工作区")
                 }
             }
         }
@@ -359,20 +445,20 @@ private fun CreateWorkspaceDialog(
     var name by remember { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("New workspace") },
+        title = { Text("新建工作区") },
         text = {
             OutlinedTextField(
                 value = name,
                 onValueChange = { name = it },
-                label = { Text("Name") },
+                label = { Text("名称") },
                 singleLine = true,
             )
         },
         confirmButton = {
-            TextButton(onClick = { onConfirm(name) }, enabled = name.isNotBlank()) { Text("Create") }
+            TextButton(onClick = { onConfirm(name) }, enabled = name.isNotBlank()) { Text("创建") }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
+            TextButton(onClick = onDismiss) { Text("取消") }
         },
     )
 }

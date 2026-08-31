@@ -1,13 +1,28 @@
 package workspacemcp.app.domain
 
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
-import kotlinx.coroutines.withContext
 import me.rerere.workspace.RootfsInstallProgress
 import me.rerere.workspace.WorkspaceManager
 import workspacemcp.app.AppRuntime
 import workspacemcp.app.data.WorkspaceRecord
 import java.util.UUID
+
+/** rootfs 安装状态, 供 UI 与 MCP 工具共享观察 */
+data class RootfsInstallState(
+    val workspaceId: String,
+    val workspaceName: String,
+    val progress: RootfsInstallProgress? = null,
+    val error: String? = null,
+    val finished: Boolean = false,
+)
 
 
 /**
@@ -86,16 +101,48 @@ class WorkspaceController(private val runtime: AppRuntime) {
         return manager.hasRootfs(record.root)
     }
 
-    /** 安装 rootfs, 对应原 WorkspaceRepository.installRootfs (取消 -> 线程中断) */
-    suspend fun installRootfs(
-        id: String,
-        url: String = DEFAULT_ROOTFS_URL,
-        onProgress: (RootfsInstallProgress) -> Unit = {},
-    ): Unit = withContext(Dispatchers.IO) {
+    /**
+     * 安装 rootfs — 后台单飞任务:
+     * - 在 controller 自己的 scope 中执行, 不随 UI 界面销毁或 MCP HTTP 连接断开而取消,
+     *   避免旧安装的 finally 清理与新安装并发读写同一个 tmp/rootfs.tar.gz 导致 ENOENT
+     * - 全局同一时刻只允许一个安装, 已有安装进行中时直接返回当前状态
+     */
+    private val installScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val _installState = MutableStateFlow<RootfsInstallState?>(null)
+    val installState: StateFlow<RootfsInstallState?> = _installState.asStateFlow()
+
+    fun installRootfs(id: String, url: String = DEFAULT_ROOTFS_URL): RootfsInstallState {
         val record = db.getById(id) ?: error("Workspace not found: $id")
-        runInterruptible {
-            runtime.installer.install(record.root, url, onProgress)
+        val initial = RootfsInstallState(workspaceId = record.id, workspaceName = record.name)
+        synchronized(this) {
+            _installState.value?.takeIf { !it.finished }?.let { return it }
+            _installState.value = initial
         }
+        installScope.launch {
+            val result = runCatching {
+                runInterruptible {
+                    runtime.installer.install(record.root, url) { progress ->
+                        _installState.value = _installState.value?.copy(progress = progress)
+                    }
+                }
+            }
+            _installState.value = _installState.value?.copy(
+                finished = true,
+                error = result.exceptionOrNull()?.let { it.message ?: it.toString() },
+            )
+        }
+        return initial
+    }
+
+    /** 清除已结束的安装状态 (UI 关闭对话框 / 下次安装前) */
+    fun clearInstallState() {
+        if (_installState.value?.finished == true) {
+            _installState.value = null
+        }
+    }
+
+    fun shutdown() {
+        installScope.cancel()
     }
 
     companion object {

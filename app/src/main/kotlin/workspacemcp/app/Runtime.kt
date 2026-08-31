@@ -42,9 +42,12 @@ object Runtime {
     }
 }
 
-data class AppRuntime(
+class AppRuntime(
     val manager: WorkspaceManager,
     val installer: RootfsInstaller,
     val db: WorkspaceDb,
     val settings: SettingsStore,
-)
+) {
+    /** 应用级唯一 controller, UI 与 MCP 服务共享同一份安装状态 */
+    val controller = workspacemcp.app.domain.WorkspaceController(this)
+}

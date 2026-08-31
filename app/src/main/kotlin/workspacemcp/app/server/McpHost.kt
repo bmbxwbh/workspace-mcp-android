@@ -37,7 +37,6 @@ import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
 import kotlinx.serialization.json.putJsonArray
 import workspacemcp.app.AppRuntime
-import workspacemcp.app.domain.WorkspaceController
 import workspacemcp.app.mcp.WorkspaceTool
 import workspacemcp.app.mcp.createWorkspaceTools
 
@@ -63,7 +62,7 @@ private const val PROTOCOL_VERSION = "2025-06-18"
  * - CORS 全开放, 浏览器客户端可直接连接
  */
 fun startMcpServer(runtime: AppRuntime): McpServerHandle {
-    val controller = WorkspaceController(runtime)
+    val controller = runtime.controller
     val tools = createWorkspaceTools(controller).associateBy { it.name }
     val port = runtime.settings.port()
     val token = runtime.settings.token()

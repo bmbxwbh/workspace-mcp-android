@@ -43,17 +43,13 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.launch
 import me.rerere.workspace.RootfsInstallProgress
 import workspacemcp.app.data.WorkspaceRecord
-import workspacemcp.app.domain.WorkspaceController
 import workspacemcp.app.server.McpService
 
 class MainActivity : ComponentActivity() {
@@ -74,8 +70,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun App(runtime: AppRuntime) {
     val context = LocalContext.current
-    val controller = remember { WorkspaceController(runtime) }
-    val scope = rememberCoroutineScope()
+    val controller = runtime.controller
 
     val workspaces = remember { mutableStateOf<List<WorkspaceRecord>>(emptyList()) }
     val currentId = remember { mutableStateOf<String?>(null) }
@@ -86,8 +81,9 @@ private fun App(runtime: AppRuntime) {
     val showCreate = remember { mutableStateOf(false) }
     val deleteTarget = remember { mutableStateOf<WorkspaceRecord?>(null) }
     val rootfsTarget = remember { mutableStateOf<WorkspaceRecord?>(null) }
-    val rootfsProgress = remember { MutableStateFlow<RootfsInstallProgress?>(null) }
-    val rootfsProgressState by rootfsProgress.collectAsState()
+    // 安装由 controller 后台执行, 状态全局共享, 旋转屏幕/切后台不丢失进度
+    val installState by controller.installState.collectAsState()
+    val installRunning = installState?.finished == false
     val message = remember { mutableStateOf<String?>(null) }
     val floatingEnabled = remember { mutableStateOf(runtime.settings.floatingEnabled()) }
     val hasOverlayPermission = remember { mutableStateOf(McpService.hasOverlayPermission(context)) }
@@ -105,6 +101,19 @@ private fun App(runtime: AppRuntime) {
     }
 
     LaunchedEffect(Unit) { refresh() }
+
+    // 安装结束: 刷新列表; 成功则提示并自动收起对话框, 失败保留对话框展示错误
+    LaunchedEffect(installState?.finished) {
+        val state = installState
+        if (state?.finished == true) {
+            refresh()
+            if (state.error == null) {
+                message.value = "rootfs 安装完成"
+                rootfsTarget.value = null
+                controller.clearInstallState()
+            }
+        }
+    }
 
     // Activity 每次回到 RESUMED (含从系统权限设置页返回) 时刷新权限状态
     val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
@@ -271,8 +280,9 @@ private fun App(runtime: AppRuntime) {
                     workspace = workspace,
                     isCurrent = workspace.id == currentId.value,
                     hasRootfs = controller.hasRootfs(workspace.id),
-                    rootfsInstalling = rootfsTarget.value?.id == workspace.id && rootfsProgressState != null,
-                    rootfsProgress = rootfsProgressState,
+                    rootfsInstalling = installRunning && installState?.workspaceId == workspace.id,
+                    rootfsProgress = installState?.takeIf { it.workspaceId == workspace.id }?.progress,
+                    installBusy = installRunning,
                     onSwitch = {
                         runCatching { controller.switch(workspace.id) }
                             .onSuccess { refresh() }
@@ -319,54 +329,69 @@ private fun App(runtime: AppRuntime) {
         )
     }
 
-    rootfsTarget.value?.let { target ->
+    // 安装对话框: 未确认时显示确认文案; 确认后由共享 installState 驱动, 旋转屏幕不丢失
+    if (rootfsTarget.value != null || installState != null) {
+        val state = installState
+        val target = rootfsTarget.value
         AlertDialog(
             onDismissRequest = {
-                if (rootfsProgressState == null) rootfsTarget.value = null
+                // 进行中不允许关闭 (安装已在后台, 关闭对话框也无意义); 结束后可关闭
+                if (state == null || state.finished) {
+                    rootfsTarget.value = null
+                    controller.clearInstallState()
+                }
             },
             title = { Text("安装 rootfs") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("下载 Ubuntu 24.04 基础版 (arm64) 到「${target.name}」？可能需要较长时间。")
-                    rootfsProgressState?.let { progress ->
-                        when (progress.stage) {
-                            me.rerere.workspace.RootfsInstallStage.DOWNLOADING -> {
-                                val mb = progress.bytesRead / 1024 / 1024
-                                val total = progress.totalBytes?.let { "${it / 1024 / 1024}MB" } ?: "?"
-                                Text("下载中… $mb MB / $total")
+                    if (state == null || state.finished) {
+                        val name = state?.workspaceName ?: target?.name.orEmpty()
+                        Text("下载 Ubuntu 24.04 基础版 (arm64) 到「$name」？可能需要较长时间。")
+                        state?.error?.let {
+                            Text(
+                                "安装失败: $it",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        }
+                    } else {
+                        Text("正在安装到「${state.workspaceName}」, 安装在后台进行, 可最小化应用等待。")
+                        state.progress?.let { progress ->
+                            when (progress.stage) {
+                                me.rerere.workspace.RootfsInstallStage.DOWNLOADING -> {
+                                    val mb = progress.bytesRead / 1024 / 1024
+                                    val total = progress.totalBytes?.let { "${it / 1024 / 1024}MB" } ?: "?"
+                                    Text("下载中… $mb MB / $total")
+                                }
+                                me.rerere.workspace.RootfsInstallStage.EXTRACTING ->
+                                    Text("解压中… 已解压 ${progress.entriesExtracted} 项")
+                                me.rerere.workspace.RootfsInstallStage.INSTALLED ->
+                                    Text("rootfs 安装完成")
                             }
-                            me.rerere.workspace.RootfsInstallStage.EXTRACTING ->
-                                Text("解压中… 已解压 ${progress.entriesExtracted} 项")
-                            me.rerere.workspace.RootfsInstallStage.INSTALLED ->
-                                Text("rootfs 安装完成")
                         }
                         LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                     }
                 }
             },
             confirmButton = {
-                if (rootfsProgressState == null) {
-                    TextButton(onClick = {
-                        scope.launch {
-                            runCatching {
-                                controller.installRootfs(target.id) { progress ->
-                                    rootfsProgress.value = progress
-                                }
-                            }.onSuccess {
-                                rootfsProgress.value = null
-                                rootfsTarget.value = null
-                                message.value = "rootfs 安装完成"
-                            }.onFailure {
-                                rootfsProgress.value = null
+                when {
+                    state == null -> TextButton(onClick = {
+                        runCatching { controller.installRootfs(target?.id.orEmpty()) }
+                            .onSuccess { rootfsTarget.value = null }
+                            .onFailure {
                                 rootfsTarget.value = null
                                 message.value = it.message
                             }
-                        }
                     }) { Text("安装") }
+
+                    state.finished -> TextButton(onClick = {
+                        rootfsTarget.value = null
+                        controller.clearInstallState()
+                    }) { Text("关闭") }
                 }
             },
             dismissButton = {
-                if (rootfsProgressState == null) {
+                if (state == null) {
                     TextButton(onClick = { rootfsTarget.value = null }) { Text("取消") }
                 }
             },
@@ -381,6 +406,7 @@ private fun WorkspaceCard(
     hasRootfs: Boolean,
     rootfsInstalling: Boolean,
     rootfsProgress: RootfsInstallProgress?,
+    installBusy: Boolean,
     onSwitch: () -> Unit,
     onInstallRootfs: () -> Unit,
     onDelete: () -> Unit,
@@ -425,7 +451,7 @@ private fun WorkspaceCard(
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(onClick = onInstallRootfs, enabled = !rootfsInstalling) {
+                TextButton(onClick = onInstallRootfs, enabled = !installBusy) {
                     Text(if (hasRootfs) "重新安装 rootfs" else "安装 rootfs")
                 }
                 Spacer(Modifier.weight(1f))

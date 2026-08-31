@@ -121,15 +121,38 @@ fun createWorkspaceTools(controller: WorkspaceController): List<WorkspaceTool> {
 
         tool(
             name = "workspace_install_rootfs",
-            description = "Download and install a Linux rootfs (default: Ubuntu 24.04 base arm64) into a workspace. " +
-                "Required before workspace_shell can run. This is a long-running operation (hundreds of MB).",
+            description = "Start downloading and installing a Linux rootfs (default: Ubuntu 24.04 base arm64) " +
+                "into a workspace. Runs in background and returns immediately; poll workspace_install_status " +
+                "until finished=true. Required before workspace_shell can run.",
             "id" to propString("Workspace id. Defaults to the current workspace.", optional = true),
             "url" to propString("Rootfs tar.gz/tar.xz download url. Defaults to Ubuntu 24.04 base arm64.", optional = true),
         ) { args ->
             val id = args.optString("id") ?: withIO { controller.requireCurrent().id }
             val url = args.optString("url") ?: WorkspaceController.DEFAULT_ROOTFS_URL
-            controller.installRootfs(id, url)
-            json { put("id", id); put("installed", true); put("url", url) }
+            val state = controller.installRootfs(id, url)
+            json {
+                put("id", id)
+                put("url", url)
+                put("started", !state.finished)
+                put("state", state.toJsonString())
+                if (state.finished && state.error == null) put("installed", true)
+            }
+        },
+
+        tool(
+            name = "workspace_install_status",
+            description = "Query the current rootfs installation state (stage, progress, error). " +
+                "Returns installing=false when idle.",
+        ) {
+            val state = controller.installState.value
+            if (state == null) {
+                json { put("installing", false) }
+            } else {
+                json {
+                    put("installing", !state.finished)
+                    put("state", state.toJsonString())
+                }
+            }
         },
 
         // ===== 文件工具 (Rootfs 绝对路径, 与原 App 的 agent 工具语义一致) =====
@@ -346,6 +369,20 @@ private fun WorkspaceRecord.toJsonString(current: Boolean): String = buildJsonOb
     put("updatedAt", updatedAt)
     lastAccessAt?.let { put("lastAccessAt", it) }
     put("current", current)
+}.toString()
+
+private fun workspacemcp.app.domain.RootfsInstallState.toJsonString(): String = buildJsonObject {
+    put("workspaceId", workspaceId)
+    put("workspaceName", workspaceName)
+    progress?.let { p ->
+        put("stage", p.stage.name)
+        p.totalBytes?.let { put("totalBytes", it) }
+        put("bytesRead", p.bytesRead)
+        put("entriesExtracted", p.entriesExtracted)
+        p.currentEntry?.let { put("currentEntry", it) }
+    }
+    error?.let { put("error", it) }
+    put("finished", finished)
 }.toString()
 
 @JvmName("fileEntriesToJsonArray")

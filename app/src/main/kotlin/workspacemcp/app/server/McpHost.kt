@@ -57,7 +57,7 @@ private const val PROTOCOL_VERSION = "2025-06-18"
  * 全宽容 MCP HTTP 服务器 (不使用官方 SDK 传输层, 参考 SOMCP 的做法):
  * - POST /mcp (/rpc, /messages 别名): 任意 Accept/Content-Type, JSON-RPC 请求直接返回 JSON 响应
  * - GET /mcp: 服务器发现信息; Accept 含 text/event-stream 时返回 SSE 兼容 hello
- * - 通知 (无 id 或 notifications/*) 不回复, 返回 202
+ * - 通知 (无 id 或以 notifications/ 为前缀的方法) 不回复, 返回 202
  * - 鉴权: Bearer 头或 ?token= 查询参数; 首页与健康检查免鉴权
  * - CORS 全开放, 浏览器客户端可直接连接
  */

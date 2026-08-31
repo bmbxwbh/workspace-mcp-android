@@ -432,6 +432,7 @@ private fun WorkspaceRecord.toJsonString(current: Boolean): String = buildJsonOb
     put("current", current)
 }.toString()
 
+@JvmName("fileEntriesToJsonArray")
 private fun List<WorkspaceFileEntry>.toJsonArray(): String = kotlinx.serialization.json.JsonArray(
     map { entry ->
         buildJsonObject {
@@ -444,6 +445,7 @@ private fun List<WorkspaceFileEntry>.toJsonArray(): String = kotlinx.serializati
     },
 ).toString()
 
+@JvmName("searchMatchesToJsonArray")
 private fun List<me.rerere.workspace.WorkspaceSearchMatch>.toJsonArray(): String =
     kotlinx.serialization.json.JsonArray(
         map { match ->
